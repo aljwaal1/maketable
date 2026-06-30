@@ -35,6 +35,18 @@ jobs:
           from pathlib import Path
           import re
           package='com.explapp.excel_scanner_ar'
+          deps = '''
+              implementation 'com.google.mlkit:text-recognition-chinese:16.0.1'
+              implementation 'com.google.mlkit:text-recognition-devanagari:16.0.1'
+              implementation 'com.google.mlkit:text-recognition-japanese:16.0.1'
+              implementation 'com.google.mlkit:text-recognition-korean:16.0.1'
+          '''
+          deps_kts = '''
+              implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
+              implementation("com.google.mlkit:text-recognition-devanagari:16.0.1")
+              implementation("com.google.mlkit:text-recognition-japanese:16.0.1")
+              implementation("com.google.mlkit:text-recognition-korean:16.0.1")
+          '''
           for p in [Path('android/app/build.gradle'), Path('android/app/build.gradle.kts')]:
               if not p.exists():
                   continue
@@ -43,6 +55,12 @@ jobs:
               s=re.sub(r'namespace\s*(=)?\s*"[^"]+"', lambda m: f'namespace = "{package}"' if m.group(1) else f'namespace "{package}"', s)
               s=re.sub(r'minSdkVersion\s+\d+', 'minSdkVersion 23', s)
               s=re.sub(r'minSdk\s*=\s*\d+', 'minSdk = 23', s)
+              if p.suffix == '.kts':
+                  if 'text-recognition-chinese' not in s:
+                      s += '\ndependencies {\n' + deps_kts + '\n}\n'
+              else:
+                  if 'text-recognition-chinese' not in s:
+                      s += '\ndependencies {\n' + deps + '\n}\n'
               p.write_text(s)
           PY
 
