@@ -3,7 +3,7 @@ name: Build APK Direct
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
 
 permissions:
   contents: write
@@ -11,7 +11,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,62 +26,27 @@ jobs:
         with:
           channel: stable
 
-      - name: Create Android platform
+      - name: Prepare Android
         run: |
           flutter create --platforms=android --org com.explapp --no-pub .
           rm -rf test
           rm -f analysis_options.yaml
-
-      - name: Configure Android
-        run: |
           python3 - <<'PY'
           from pathlib import Path
-
-          groovy = Path('android/app/build.gradle')
-          kotlin = Path('android/app/build.gradle.kts')
-          gradle = groovy if groovy.exists() else kotlin
-          if not gradle.exists():
-              raise FileNotFoundError('Neither android/app/build.gradle nor android/app/build.gradle.kts exists after flutter create')
-
-          text = gradle.read_text()
-          text = text.replace('namespace = "com.explapp.excel_scanner_ar"', 'namespace = "com.explapp.excelscannerar"')
-          text = text.replace('applicationId = "com.explapp.excel_scanner_ar"', 'applicationId = "com.explapp.excelscannerar"')
-          text = text.replace('namespace "com.explapp.excel_scanner_ar"', 'namespace "com.explapp.excelscannerar"')
-          text = text.replace('applicationId "com.explapp.excel_scanner_ar"', 'applicationId "com.explapp.excelscannerar"')
-          text = text.replace('minSdk = flutter.minSdkVersion', 'minSdk = 24')
-          text = text.replace('minSdkVersion flutter.minSdkVersion', 'minSdkVersion 24')
-          gradle.write_text(text)
-
-          manifest = Path('android/app/src/main/AndroidManifest.xml')
-          manifest.write_text('''<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <uses-permission android:name="android.permission.CAMERA" />
-              <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-              <application
-                  android:label="صورة إلى Excel"
-                  android:name="${applicationName}"
-                  android:icon="@mipmap/ic_launcher">
-                  <activity
-                      android:name=".MainActivity"
-                      android:exported="true"
-                      android:launchMode="singleTop"
-                      android:taskAffinity=""
-                      android:theme="@style/LaunchTheme"
-                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
-                      android:hardwareAccelerated="true"
-                      android:windowSoftInputMode="adjustResize">
-                      <meta-data android:name="io.flutter.embedding.android.NormalTheme" android:resource="@style/NormalTheme" />
-                      <intent-filter>
-                          <action android:name="android.intent.action.MAIN"/>
-                          <category android:name="android.intent.category.LAUNCHER"/>
-                      </intent-filter>
-                  </activity>
-                  <meta-data android:name="flutterEmbedding" android:value="2" />
-              </application>
-          </manifest>''')
+          import re
+          package='com.explapp.excel_scanner_ar'
+          for p in [Path('android/app/build.gradle'), Path('android/app/build.gradle.kts')]:
+              if not p.exists():
+                  continue
+              s=p.read_text()
+              s=re.sub(r'applicationId\s*(=)?\s*"[^"]+"', lambda m: f'applicationId = "{package}"' if m.group(1) else f'applicationId "{package}"', s)
+              s=re.sub(r'namespace\s*(=)?\s*"[^"]+"', lambda m: f'namespace = "{package}"' if m.group(1) else f'namespace "{package}"', s)
+              s=re.sub(r'minSdkVersion\s+\d+', 'minSdkVersion 23', s)
+              s=re.sub(r'minSdk\s*=\s*\d+', 'minSdk = 23', s)
+              p.write_text(s)
           PY
 
-      - name: Pub get
+      - name: Get packages
         run: flutter pub get
 
       - name: Analyze
@@ -95,18 +59,13 @@ jobs:
         run: |
           mkdir -p apk
           cp build/app/outputs/flutter-apk/app-release.apk apk/excel-scanner-ar.apk
-          cat > DOWNLOAD_APK.md <<'EOF2'
-          # تحميل التطبيق
-
-          APK مباشر:
-
-          `apk/excel-scanner-ar.apk`
-          EOF2
+          echo '# APK' > DOWNLOAD_APK.md
+          echo '[Download APK](apk/excel-scanner-ar.apk)' >> DOWNLOAD_APK.md
 
       - name: Commit APK
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
           git add apk/excel-scanner-ar.apk DOWNLOAD_APK.md
-          git commit -m "Update APK" || echo "No changes"
+          git commit -m "Build APK" || echo "No changes to commit"
           git push || echo "Push skipped"
