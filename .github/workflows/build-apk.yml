@@ -31,6 +31,7 @@ jobs:
         run: |
           flutter create --platforms=android --org com.explapp --no-pub .
           rm -rf test
+          rm -f analysis_options.yaml
 
       - name: Configure Android
         run: |

@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' as ui;
 import 'package:excel/excel.dart';
 import 'package:flutter/material.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
@@ -28,7 +29,7 @@ class ExcelScannerApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff137C72)),
       ),
       home: const Directionality(
-        textDirection: TextDirection.rtl,
+        textDirection: ui.TextDirection.rtl,
         child: ScannerHomePage(),
       ),
     );
@@ -165,7 +166,7 @@ class _ScannerHomePageState extends State<ScannerHomePage> {
       showDragHandle: true,
       isScrollControlled: true,
       builder: (_) => Directionality(
-        textDirection: TextDirection.rtl,
+        textDirection: ui.TextDirection.rtl,
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: SizedBox(

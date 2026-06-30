@@ -12,3 +12,7 @@
 
 ## البناء
 ارفع المشروع إلى GitHub ثم شغل Actions. سيظهر APK داخل مجلد `apk`.
+
+
+## Fix
+تم إصلاح workflow و TextDirection و analysis_options.
