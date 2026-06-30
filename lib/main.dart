@@ -1,12 +1,9 @@
 import 'dart:io';
-import 'dart:ui' as ui;
-import 'package:excel/excel.dart';
+import 'package:excel/excel.dart' as xls;
 import 'package:flutter/material.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'package:share_plus/share_plus.dart';
 
 void main() {
@@ -21,480 +18,254 @@ class ExcelScannerApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      locale: const Locale('ar'),
       title: 'صورة إلى Excel',
       theme: ThemeData(
         useMaterial3: true,
+        colorSchemeSeed: const Color(0xff26786a),
         fontFamily: 'Roboto',
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff137C72)),
       ),
       home: const Directionality(
-        textDirection: ui.TextDirection.rtl,
-        child: ScannerHomePage(),
+        textDirection: TextDirection.rtl,
+        child: HomePage(),
       ),
     );
   }
 }
 
-class ScannerHomePage extends StatefulWidget {
-  const ScannerHomePage({super.key});
-
-  @override
-  State<ScannerHomePage> createState() => _ScannerHomePageState();
+class InvoiceRow {
+  String item;
+  String qty;
+  String unitPrice;
+  String total;
+  InvoiceRow({required this.item, this.qty = '', this.unitPrice = '', this.total = ''});
 }
 
-class _ScannerHomePageState extends State<ScannerHomePage> {
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
   final ImagePicker _picker = ImagePicker();
-  final List<ReceiptRow> _rows = [];
-  final List<String> _rawLines = [];
-  File? _imageFile;
+  final TextEditingController _rawController = TextEditingController();
+  final List<InvoiceRow> _rows = [];
   bool _busy = false;
-  String _status = 'صوّر فاتورة كاش أو اختر صورة من المعرض.';
+  String _status = 'اختر صورة فاتورة أو جدول، أو الصق النص يدويًا للتجربة.';
+
+  @override
+  void dispose() {
+    _rawController.dispose();
+    super.dispose();
+  }
 
   Future<void> _pick(ImageSource source) async {
-    setState(() {
-      _busy = true;
-      _status = source == ImageSource.camera ? 'جاري فتح الكاميرا...' : 'جاري اختيار الصورة...';
-    });
-
     try {
-      if (source == ImageSource.camera) {
-        await Permission.camera.request();
-      }
-      final XFile? picked = await _picker.pickImage(
-        source: source,
-        imageQuality: 95,
-        maxWidth: 2200,
-      );
-      if (picked == null) {
-        setState(() {
-          _busy = false;
-          _status = 'لم يتم اختيار صورة.';
-        });
+      setState(() {
+        _busy = true;
+        _status = 'جاري فتح الصورة وقراءة النص...';
+      });
+      final XFile? file = await _picker.pickImage(source: source, imageQuality: 95);
+      if (file == null) {
+        setState(() => _status = 'لم يتم اختيار صورة.');
         return;
       }
-      _imageFile = File(picked.path);
-      await _runOcr(_imageFile!);
+      final inputImage = InputImage.fromFilePath(file.path);
+      final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
+      final result = await recognizer.processImage(inputImage);
+      await recognizer.close();
+      _rawController.text = result.text.trim();
+      _parseText();
     } catch (e) {
-      setState(() {
-        _busy = false;
-        _status = 'حدث خطأ أثناء قراءة الصورة: $e';
-      });
+      setState(() => _status = 'حدث خطأ أثناء القراءة. جرّب صورة أوضح أو استخدم الإدخال اليدوي.');
+    } finally {
+      if (mounted) setState(() => _busy = false);
     }
   }
 
-  Future<void> _runOcr(File file) async {
-    setState(() => _status = 'جاري قراءة النص من الصورة...');
-    final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
-    try {
-      final inputImage = InputImage.fromFile(file);
-      final recognized = await recognizer.processImage(inputImage);
-      final parsed = ReceiptParser.parse(recognized);
-      setState(() {
-        _rawLines
-          ..clear()
-          ..addAll(parsed.rawLines);
-        _rows
-          ..clear()
-          ..addAll(parsed.rows);
-        _busy = false;
-        _status = _rows.isEmpty
-            ? 'تم استخراج النص، لكن لم أجد صفوف فاتورة واضحة. يمكنك إضافة صف يدويًا أو فتح النص الخام.'
-            : 'تم تجهيز ${_rows.length} صف. راجع الجدول ثم صدّره إلى Excel.';
-      });
-    } finally {
-      await recognizer.close();
+  void _parseText() {
+    final text = _normalizeNumbers(_rawController.text);
+    final parsed = _parseInvoice(text);
+    setState(() {
+      _rows
+        ..clear()
+        ..addAll(parsed);
+      _status = parsed.isEmpty
+          ? 'لم أستطع تكوين جدول تلقائيًا. أضف الصفوف يدويًا أو عدّل النص ثم اضغط تحليل.'
+          : 'تم استخراج ${parsed.length} صف. راجع الجدول قبل التصدير.';
+    });
+  }
+
+  List<InvoiceRow> _parseInvoice(String text) {
+    final lines = text
+        .split('\n')
+        .map((e) => e.trim())
+        .where((e) => e.length > 1)
+        .toList();
+    final rows = <InvoiceRow>[];
+    final skipWords = RegExp(r'(total|subtotal|tax|vat|cash|visa|change|invoice|receipt|المجموع|الإجمالي|الضريبة|فاتورة|نقد|مدفوع)', caseSensitive: false);
+
+    for (final line in lines) {
+      if (skipWords.hasMatch(line)) continue;
+      final nums = RegExp(r'[-+]?\d+(?:[\.,]\d+)?').allMatches(line).map((m) => m.group(0)!.replaceAll(',', '.')).toList();
+      if (nums.isEmpty) continue;
+      var item = line.replaceAll(RegExp(r'[-+]?\d+(?:[\.,]\d+)?'), ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+      item = item.replaceAll(RegExp(r'[xX×*=]'), ' ').trim();
+      if (item.isEmpty) item = 'صنف ${rows.length + 1}';
+      String qty = '';
+      String unit = '';
+      String total = '';
+      if (nums.length >= 3) {
+        qty = nums[0];
+        unit = nums[1];
+        total = nums.last;
+      } else if (nums.length == 2) {
+        unit = nums[0];
+        total = nums[1];
+      } else {
+        total = nums[0];
+      }
+      rows.add(InvoiceRow(item: item, qty: qty, unitPrice: unit, total: total));
     }
+    return rows;
+  }
+
+  String _normalizeNumbers(String input) {
+    const arabic = '٠١٢٣٤٥٦٧٨٩';
+    const persian = '۰۱۲۳۴۵۶۷۸۹';
+    var out = input;
+    for (var i = 0; i < 10; i++) {
+      out = out.replaceAll(arabic[i], '$i').replaceAll(persian[i], '$i');
+    }
+    return out;
   }
 
   void _addRow() {
-    setState(() => _rows.add(ReceiptRow(item: '', quantity: '', unitPrice: '', total: '', note: '')));
-  }
-
-  void _deleteRow(int index) {
-    setState(() => _rows.removeAt(index));
-  }
-
-  Future<void> _exportExcel() async {
-    if (_rows.isEmpty) {
-      _snack('لا يوجد جدول للتصدير.');
-      return;
-    }
-    setState(() {
-      _busy = true;
-      _status = 'جاري إنشاء ملف Excel...';
-    });
-    try {
-      final directory = await getApplicationDocumentsDirectory();
-      final stamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
-      final path = '${directory.path}/receipt_$stamp.xlsx';
-      final file = await ExcelExporter.exportXlsx(_rows, path);
-      setState(() {
-        _busy = false;
-        _status = 'تم إنشاء ملف Excel بنجاح.';
-      });
-      await Share.shareXFiles([XFile(file.path)], text: 'ملف Excel من تطبيق صورة إلى Excel');
-    } catch (e) {
-      setState(() {
-        _busy = false;
-        _status = 'فشل إنشاء Excel: $e';
-      });
-    }
+    setState(() => _rows.add(InvoiceRow(item: 'صنف جديد')));
   }
 
   Future<void> _exportCsv() async {
-    if (_rows.isEmpty) {
-      _snack('لا يوجد جدول للتصدير.');
-      return;
-    }
-    final directory = await getApplicationDocumentsDirectory();
-    final stamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
-    final path = '${directory.path}/receipt_$stamp.csv';
-    final buffer = StringBuffer('الصنف,الكمية,سعر الوحدة,الإجمالي,ملاحظة\n');
+    if (_rows.isEmpty) return;
+    final dir = await getApplicationDocumentsDirectory();
+    final file = File('${dir.path}/invoice_table.csv');
+    final b = StringBuffer('item,quantity,unit_price,total\n');
     for (final r in _rows) {
-      buffer.writeln([r.item, r.quantity, r.unitPrice, r.total, r.note].map(_csv).join(','));
+      b.writeln('"${_csv(r.item)}","${_csv(r.qty)}","${_csv(r.unitPrice)}","${_csv(r.total)}"');
     }
-    final file = await File(path).writeAsString(buffer.toString());
+    await file.writeAsString(b.toString());
     await Share.shareXFiles([XFile(file.path)], text: 'ملف CSV من تطبيق صورة إلى Excel');
   }
 
-  String _csv(String value) => '"${value.replaceAll('"', '""')}"';
-
-  void _showRawText() {
-    showModalBottomSheet(
-      context: context,
-      showDragHandle: true,
-      isScrollControlled: true,
-      builder: (_) => Directionality(
-        textDirection: ui.TextDirection.rtl,
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: SizedBox(
-            height: MediaQuery.of(context).size.height * .65,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const Text('النص الخام المستخرج', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                const SizedBox(height: 12),
-                Expanded(
-                  child: SingleChildScrollView(
-                    child: SelectableText(_rawLines.isEmpty ? 'لا يوجد نص.' : _rawLines.join('\n')),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
+  Future<void> _exportExcel() async {
+    if (_rows.isEmpty) return;
+    final book = xls.Excel.createExcel();
+    final sheet = book['Invoice'];
+    sheet.cell(xls.CellIndex.indexByString('A1')).value = 'الصنف';
+    sheet.cell(xls.CellIndex.indexByString('B1')).value = 'الكمية';
+    sheet.cell(xls.CellIndex.indexByString('C1')).value = 'سعر الوحدة';
+    sheet.cell(xls.CellIndex.indexByString('D1')).value = 'الإجمالي';
+    for (var i = 0; i < _rows.length; i++) {
+      final row = _rows[i];
+      final excelRow = i + 2;
+      sheet.cell(xls.CellIndex.indexByString('A$excelRow')).value = row.item;
+      sheet.cell(xls.CellIndex.indexByString('B$excelRow')).value = row.qty;
+      sheet.cell(xls.CellIndex.indexByString('C$excelRow')).value = row.unitPrice;
+      sheet.cell(xls.CellIndex.indexByString('D$excelRow')).value = row.total;
+    }
+    final bytes = book.encode();
+    if (bytes == null) return;
+    final dir = await getApplicationDocumentsDirectory();
+    final file = File('${dir.path}/invoice_table.xlsx');
+    await file.writeAsBytes(bytes, flush: true);
+    await Share.shareXFiles([XFile(file.path)], text: 'ملف Excel من تطبيق صورة إلى Excel');
   }
 
-  void _snack(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
-  }
+  String _csv(String value) => value.replaceAll('"', '""');
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xffF4F7F6),
-      appBar: AppBar(
-        title: const Text('صورة إلى Excel'),
-        centerTitle: true,
-        backgroundColor: Colors.transparent,
-      ),
+      appBar: AppBar(title: const Text('صورة إلى Excel')),
       body: SafeArea(
-        child: Column(
+        child: ListView(
+          padding: const EdgeInsets.all(14),
           children: [
-            _TopCard(
-              status: _status,
-              busy: _busy,
-              onCamera: () => _pick(ImageSource.camera),
-              onGallery: () => _pick(ImageSource.gallery),
-              onRaw: _showRawText,
-            ),
-            if (_imageFile != null)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(18),
-                  child: Image.file(_imageFile!, height: 110, fit: BoxFit.cover, width: double.infinity),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Text('حوّل فاتورة كاش أو جدول إلى Excel', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
+                    Text(_status),
+                    const SizedBox(height: 12),
+                    if (_busy) const LinearProgressIndicator(),
+                    const SizedBox(height: 8),
+                    FilledButton.icon(onPressed: _busy ? null : () => _pick(ImageSource.camera), icon: const Icon(Icons.camera_alt), label: const Text('تصوير فاتورة')),
+                    OutlinedButton.icon(onPressed: _busy ? null : () => _pick(ImageSource.gallery), icon: const Icon(Icons.photo_library), label: const Text('اختيار صورة')),
+                  ],
                 ),
               ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _rawController,
+              minLines: 4,
+              maxLines: 8,
+              decoration: const InputDecoration(border: OutlineInputBorder(), labelText: 'النص المقروء أو الإدخال اليدوي'),
+            ),
             const SizedBox(height: 8),
-            Expanded(child: _ReceiptTable(rows: _rows, onDelete: _deleteRow)),
+            FilledButton.tonalIcon(onPressed: _parseText, icon: const Icon(Icons.auto_fix_high), label: const Text('تحليل النص إلى جدول')),
+            const SizedBox(height: 12),
+            Row(children: [
+              Expanded(child: FilledButton.icon(onPressed: _rows.isEmpty ? null : _exportExcel, icon: const Icon(Icons.table_chart), label: const Text('تصدير Excel'))),
+              const SizedBox(width: 8),
+              Expanded(child: OutlinedButton.icon(onPressed: _rows.isEmpty ? null : _exportCsv, icon: const Icon(Icons.description), label: const Text('CSV'))),
+            ]),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(onPressed: _addRow, icon: const Icon(Icons.add), label: const Text('إضافة صف يدويًا')),
+            const SizedBox(height: 10),
+            ..._rows.asMap().entries.map((entry) {
+              final index = entry.key;
+              final row = entry.value;
+              return Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(10),
+                  child: Column(
+                    children: [
+                      Row(children: [
+                        Text('صف ${index + 1}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                        const Spacer(),
+                        IconButton(onPressed: () => setState(() => _rows.removeAt(index)), icon: const Icon(Icons.delete_outline)),
+                      ]),
+                      _cell('الصنف', row.item, (v) => row.item = v),
+                      Row(children: [
+                        Expanded(child: _cell('الكمية', row.qty, (v) => row.qty = v)),
+                        const SizedBox(width: 8),
+                        Expanded(child: _cell('السعر', row.unitPrice, (v) => row.unitPrice = v)),
+                        const SizedBox(width: 8),
+                        Expanded(child: _cell('الإجمالي', row.total, (v) => row.total = v)),
+                      ]),
+                    ],
+                  ),
+                ),
+              );
+            }),
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _addRow,
-        icon: const Icon(Icons.add),
-        label: const Text('صف'),
-      ),
-      bottomNavigationBar: Container(
-        padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
-        decoration: const BoxDecoration(color: Colors.white, boxShadow: [BoxShadow(blurRadius: 12, color: Colors.black12)]),
-        child: Row(
-          children: [
-            Expanded(
-              child: FilledButton.icon(
-                onPressed: _busy ? null : _exportExcel,
-                icon: const Icon(Icons.table_chart),
-                label: const Text('تصدير Excel'),
-              ),
-            ),
-            const SizedBox(width: 10),
-            OutlinedButton.icon(
-              onPressed: _busy ? null : _exportCsv,
-              icon: const Icon(Icons.description),
-              label: const Text('CSV'),
-            ),
-          ],
-        ),
-      ),
     );
   }
-}
 
-class _TopCard extends StatelessWidget {
-  const _TopCard({required this.status, required this.busy, required this.onCamera, required this.onGallery, required this.onRaw});
-  final String status;
-  final bool busy;
-  final VoidCallback onCamera;
-  final VoidCallback onGallery;
-  final VoidCallback onRaw;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.all(16),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(24),
-        boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 18, offset: Offset(0, 8))],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.document_scanner, size: 36, color: Color(0xff137C72)),
-              const SizedBox(width: 10),
-              const Expanded(child: Text('حوّل الفاتورة أو الصورة إلى جدول قابل للتعديل', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold))),
-              if (busy) const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2)),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Text(status, style: const TextStyle(color: Colors.black87)),
-          const SizedBox(height: 14),
-          Row(
-            children: [
-              Expanded(child: FilledButton.icon(onPressed: busy ? null : onCamera, icon: const Icon(Icons.camera_alt), label: const Text('تصوير'))),
-              const SizedBox(width: 10),
-              Expanded(child: OutlinedButton.icon(onPressed: busy ? null : onGallery, icon: const Icon(Icons.photo), label: const Text('معرض'))),
-              IconButton(onPressed: onRaw, icon: const Icon(Icons.text_snippet), tooltip: 'النص الخام'),
-            ],
-          )
-        ],
+  Widget _cell(String label, String value, ValueChanged<String> onChanged) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: TextFormField(
+        initialValue: value,
+        onChanged: onChanged,
+        decoration: InputDecoration(labelText: label, border: const OutlineInputBorder(), isDense: true),
       ),
     );
-  }
-}
-
-class _ReceiptTable extends StatelessWidget {
-  const _ReceiptTable({required this.rows, required this.onDelete});
-  final List<ReceiptRow> rows;
-  final void Function(int index) onDelete;
-
-  @override
-  Widget build(BuildContext context) {
-    if (rows.isEmpty) {
-      return const Center(
-        child: Padding(
-          padding: EdgeInsets.all(24),
-          child: Text('لا توجد صفوف بعد. صوّر فاتورة أو أضف صفًا يدويًا.', textAlign: TextAlign.center),
-        ),
-      );
-    }
-    return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 110),
-      itemCount: rows.length,
-      itemBuilder: (context, index) {
-        final row = rows[index];
-        return Card(
-          elevation: 0,
-          margin: const EdgeInsets.only(bottom: 10),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              children: [
-                Row(
-                  children: [
-                    CircleAvatar(radius: 15, child: Text('${index + 1}')),
-                    const SizedBox(width: 8),
-                    Expanded(child: _Cell(label: 'الصنف / البيان', initial: row.item, onChanged: (v) => row.item = v)),
-                    IconButton(onPressed: () => onDelete(index), icon: const Icon(Icons.delete_outline, color: Colors.redAccent)),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Expanded(child: _Cell(label: 'الكمية', initial: row.quantity, onChanged: (v) => row.quantity = v, keyboard: TextInputType.number)),
-                    const SizedBox(width: 8),
-                    Expanded(child: _Cell(label: 'سعر الوحدة', initial: row.unitPrice, onChanged: (v) => row.unitPrice = v, keyboard: TextInputType.number)),
-                    const SizedBox(width: 8),
-                    Expanded(child: _Cell(label: 'الإجمالي', initial: row.total, onChanged: (v) => row.total = v, keyboard: TextInputType.number)),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                _Cell(label: 'ملاحظة', initial: row.note, onChanged: (v) => row.note = v),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _Cell extends StatefulWidget {
-  const _Cell({required this.label, required this.initial, required this.onChanged, this.keyboard});
-  final String label;
-  final String initial;
-  final ValueChanged<String> onChanged;
-  final TextInputType? keyboard;
-
-  @override
-  State<_Cell> createState() => _CellState();
-}
-
-class _CellState extends State<_Cell> {
-  late final TextEditingController controller;
-
-  @override
-  void initState() {
-    super.initState();
-    controller = TextEditingController(text: widget.initial);
-  }
-
-  @override
-  void dispose() {
-    controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return TextField(
-      controller: controller,
-      keyboardType: widget.keyboard,
-      onChanged: widget.onChanged,
-      decoration: InputDecoration(
-        labelText: widget.label,
-        isDense: true,
-        filled: true,
-        fillColor: const Color(0xffF7FAFA),
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none),
-      ),
-    );
-  }
-}
-
-class ReceiptRow {
-  ReceiptRow({required this.item, required this.quantity, required this.unitPrice, required this.total, required this.note});
-  String item;
-  String quantity;
-  String unitPrice;
-  String total;
-  String note;
-}
-
-class ParsedReceipt {
-  ParsedReceipt({required this.rows, required this.rawLines});
-  final List<ReceiptRow> rows;
-  final List<String> rawLines;
-}
-
-class ReceiptParser {
-  static ParsedReceipt parse(RecognizedText recognized) {
-    final raw = <String>[];
-    for (final block in recognized.blocks) {
-      for (final line in block.lines) {
-        final clean = _normalize(line.text).trim();
-        if (clean.isNotEmpty) raw.add(clean);
-      }
-    }
-    final rows = <ReceiptRow>[];
-    for (final line in raw) {
-      final row = _parseLine(line);
-      if (row != null) rows.add(row);
-    }
-    return ParsedReceipt(rows: rows, rawLines: raw);
-  }
-
-  static ReceiptRow? _parseLine(String line) {
-    final lower = line.toLowerCase();
-    final totalWords = ['total', 'subtotal', 'tax', 'vat', 'cash', 'change', 'balance', 'amount', 'المجموع', 'الاجمالي', 'الإجمالي', 'الضريبة', 'المدفوع', 'الباقي'];
-    final hasTotalWord = totalWords.any(lower.contains);
-    final numbers = RegExp(r'[-+]?\d+(?:[\.,]\d+)?').allMatches(line).map((m) => m.group(0)!.replaceAll(',', '.')).toList();
-    if (numbers.isEmpty) return null;
-
-    var textPart = line.replaceAll(RegExp(r'[-+]?\d+(?:[\.,]\d+)?'), ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
-    textPart = textPart.replaceAll(RegExp(r'[xX×*=]+'), ' ').trim();
-
-    if (hasTotalWord && numbers.isNotEmpty) {
-      return ReceiptRow(item: textPart.isEmpty ? 'إجمالي / بيان' : textPart, quantity: '', unitPrice: '', total: numbers.last, note: 'ملخص');
-    }
-
-    if (numbers.length >= 3) {
-      return ReceiptRow(item: textPart, quantity: numbers[numbers.length - 3], unitPrice: numbers[numbers.length - 2], total: numbers.last, note: '');
-    }
-    if (numbers.length == 2) {
-      return ReceiptRow(item: textPart, quantity: '1', unitPrice: numbers.first, total: numbers.last, note: '');
-    }
-    if (numbers.length == 1 && textPart.length > 2) {
-      return ReceiptRow(item: textPart, quantity: '1', unitPrice: '', total: numbers.first, note: 'سطر بسعر واحد');
-    }
-    return null;
-  }
-
-  static String _normalize(String value) {
-    const arabic = '٠١٢٣٤٥٦٧٨٩';
-    const persian = '۰۱۲۳۴۵۶۷۸۹';
-    var result = value;
-    for (var i = 0; i < 10; i++) {
-      result = result.replaceAll(arabic[i], '$i').replaceAll(persian[i], '$i');
-    }
-    return result
-        .replaceAll('٫', '.')
-        .replaceAll('٬', ',')
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
-  }
-}
-
-class ExcelExporter {
-  static Future<File> exportXlsx(List<ReceiptRow> rows, String path) async {
-    final excel = Excel.createExcel();
-    final sheet = excel['الفاتورة'];
-    excel.setDefaultSheet('الفاتورة');
-    final headers = ['الصنف', 'الكمية', 'سعر الوحدة', 'الإجمالي', 'ملاحظة'];
-    for (var c = 0; c < headers.length; c++) {
-      sheet.cell(CellIndex.indexByColumnRow(columnIndex: c, rowIndex: 0)).value = TextCellValue(headers[c]);
-    }
-    for (var r = 0; r < rows.length; r++) {
-      final row = rows[r];
-      final values = [row.item, row.quantity, row.unitPrice, row.total, row.note];
-      for (var c = 0; c < values.length; c++) {
-        sheet.cell(CellIndex.indexByColumnRow(columnIndex: c, rowIndex: r + 1)).value = TextCellValue(values[c]);
-      }
-    }
-    if (excel.sheets.containsKey('Sheet1')) {
-      excel.delete('Sheet1');
-    }
-    final bytes = excel.save();
-    if (bytes == null) throw Exception('لم يتم إنشاء الملف');
-    return File(path).writeAsBytes(bytes, flush: true);
   }
 }
