@@ -1,5 +1,5 @@
-# تحميل التطبيق
+# تحميل APK
 
-APK مباشر:
+بعد نجاح GitHub Actions سيكون الملف هنا:
 
 `apk/excel-scanner-ar.apk`
