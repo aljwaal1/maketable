@@ -53,7 +53,7 @@ jobs:
         run: flutter analyze --no-fatal-infos --no-fatal-warnings
 
       - name: Build APK
-        run: flutter build apk --release --no-tree-shake-icons
+        run: flutter build apk --release --no-shrink --no-tree-shake-icons
 
       - name: Copy APK
         run: |
